@@ -1,0 +1,129 @@
+version: '3.8'
+
+services:
+  openldap:
+    image: osixia/openldap:1.5.0
+    container_name: openldap-server
+    hostname: ldap.example.org
+    environment:
+      # Configuración básica del dominio
+      LDAP_ORGANISATION: "Mi Organizacion"
+      LDAP_DOMAIN: "example.org"
+      LDAP_BASE_DN: "dc=example,dc=org"
+      
+      # Credenciales del administrador
+      LDAP_ADMIN_PASSWORD: "admin_password_123"
+      LDAP_CONFIG_PASSWORD: "config_password_123"
+      
+      # Configuraciones de seguridad
+      LDAP_READONLY_USER: "false"
+      LDAP_RFC2307BIS_SCHEMA: "false"
+      LDAP_BACKEND: "mdb"
+      LDAP_TLS: "true"
+      LDAP_TLS_CRT_FILENAME: "ldap.crt"
+      LDAP_TLS_KEY_FILENAME: "ldap.key"
+      LDAP_TLS_DH_PARAM_FILENAME: "dhparam.pem"
+      LDAP_TLS_CA_CRT_FILENAME: "ca.crt"
+      LDAP_TLS_ENFORCE: "false"
+      LDAP_TLS_CIPHER_SUITE: "SECURE256:-VERS-SSL3.0"
+      LDAP_TLS_VERIFY_CLIENT: "demand"
+      
+      # Configuración de logging
+      LDAP_LOG_LEVEL: "256"
+      
+      # Replicación (para futuro uso)
+      LDAP_REPLICATION: "false"
+      
+    volumes:
+      # Persistencia de datos
+      - ldap_data:/var/lib/ldap
+      - ldap_config:/etc/ldap/slapd.d
+      # Certificados SSL personalizados (opcional)
+      - ./certs:/container/service/slapd/assets/certs/:ro
+      # Scripts de inicialización personalizados (opcional)
+      - ./ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom:ro
+    ports:
+      - "389:389"     # LDAP no seguro
+      - "636:636"     # LDAPS (SSL)
+    networks:
+      - ldap-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ldapsearch", "-x", "-H", "ldap://localhost", "-b", "dc=example,dc=org", "-D", "cn=admin,dc=example,dc=org", "-w", "admin_password_123"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  phpldapadmin:
+    image: osixia/phpldapadmin:0.9.0
+    container_name: phpldapadmin-web
+    hostname: phpldapadmin.example.org
+    environment:
+      # Configuración del servidor LDAP
+      PHPLDAPADMIN_LDAP_HOSTS: "openldap"
+      PHPLDAPADMIN_HTTPS: "false"
+      
+      # Configuración de la interfaz web
+      PHPLDAPADMIN_TRUST_PROXY_SSL: "true"
+      PHPLDAPADMIN_SERVER_ADMIN: "admin@example.org"
+      PHPLDAPADMIN_SERVER_PATH: "/phpldapadmin"
+      
+    volumes:
+      # Configuración personalizada (opcional)
+      - ./phpldapadmin-config:/var/www/phpldapadmin/config
+    ports:
+      - "8080:80"     # Interfaz web HTTP
+      - "8443:443"    # Interfaz web HTTPS
+    depends_on:
+      openldap:
+        condition: service_healthy
+    networks:
+      - ldap-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Servicio adicional para backup automático
+  ldap-backup:
+    image: osixia/openldap:1.5.0
+    container_name: ldap-backup
+    environment:
+      LDAP_DOMAIN: "example.org"
+      LDAP_BASE_DN: "dc=example,dc=org"
+      LDAP_ADMIN_PASSWORD: "admin_password_123"
+    volumes:
+      - ldap_data:/var/lib/ldap:ro
+      - ldap_config:/etc/ldap/slapd.d:ro
+      - ./backups:/backups
+    command: >
+      bash -c "
+      while true; do
+        sleep 86400;  # Backup diario
+        slapcat -n 0 > /backups/config-$$(date +%Y%m%d_%H%M%S).ldif;
+        slapcat -n 1 > /backups/data-$$(date +%Y%m%d_%H%M%S).ldif;
+        find /backups -name '*.ldif' -mtime +7 -delete;
+      done"
+    depends_on:
+      - openldap
+    networks:
+      - ldap-network
+    restart: unless-stopped
+    profiles:
+      - backup  # Solo se ejecuta con: docker-compose --profile backup up
+
+volumes:
+  ldap_data:
+    driver: local
+  ldap_config:
+    driver: local
+
+networks:
+  ldap-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
