@@ -1,0 +1,435 @@
+# ==============================================
+# CONFIGURACIÓN INICIAL DEL STACK LDAP
+# ==============================================
+
+# 1. Crear estructura de directorios
+#!/bin/bash
+mkdir -p {certs,ldif,phpldapadmin-config,backups}
+chmod 755 backups
+
+# ==============================================
+# 2. ARCHIVO .env para variables de entorno
+# ==============================================
+cat > .env << 'EOF'
+# Configuración del dominio
+LDAP_ORGANISATION=Mi Organizacion
+LDAP_DOMAIN=example.org
+LDAP_BASE_DN=dc=example,dc=org
+
+# Credenciales (¡CAMBIAR EN PRODUCCIÓN!)
+LDAP_ADMIN_PASSWORD=admin_password_123
+LDAP_CONFIG_PASSWORD=config_password_123
+
+# Configuración de red
+LDAP_PORT=389
+LDAPS_PORT=636
+PHPLDAPADMIN_HTTP_PORT=8080
+PHPLDAPADMIN_HTTPS_PORT=8443
+
+# Configuración de backup
+BACKUP_RETENTION_DAYS=7
+EOF
+
+# ==============================================
+# 3. SCRIPT DE INICIALIZACIÓN LDAP (ldif/01-users.ldif)
+# ==============================================
+mkdir -p ldif
+cat > ldif/01-users.ldif << 'EOF'
+# Crear unidades organizativas básicas
+dn: ou=People,dc=example,dc=org
+objectClass: organizationalUnit
+ou: People
+
+dn: ou=Groups,dc=example,dc=org
+objectClass: organizationalUnit
+ou: Groups
+
+dn: ou=System,dc=example,dc=org
+objectClass: organizationalUnit
+ou: System
+
+# Crear grupo de administradores
+dn: cn=admins,ou=Groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: admins
+description: Grupo de administradores del sistema
+member: cn=admin,dc=example,dc=org
+
+# Usuario de ejemplo
+dn: uid=usuario1,ou=People,dc=example,dc=org
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: usuario1
+sn: Usuario
+givenName: Primer
+cn: Primer Usuario
+displayName: Primer Usuario
+uidNumber: 10001
+gidNumber: 10001
+userPassword: {SSHA}password_hash_aqui
+gecos: Primer Usuario
+loginShell: /bin/bash
+homeDirectory: /home/usuario1
+mail: usuario1@example.org
+EOF
+
+# ==============================================
+# 4. CONFIGURACIÓN PERSONALIZADA PHPLDAPADMIN
+# ==============================================
+mkdir -p phpldapadmin-config
+cat > phpldapadmin-config/config.php << 'EOF'
+<?php
+$servers = new Datastore();
+
+$servers->newServer('ldap_pla');
+$servers->setValue('server','name','Mi Servidor LDAP');
+$servers->setValue('server','host','openldap');
+$servers->setValue('server','port',389);
+$servers->setValue('server','base',array('dc=example,dc=org'));
+$servers->setValue('login','auth_type','cookie');
+$servers->setValue('login','bind_id','cn=admin,dc=example,dc=org');
+$servers->setValue('server','tls',false);
+
+// Configuraciones de seguridad
+$config->custom->session['blowfish'] = 'mi_clave_secreta_para_sessiones_123';
+$config->custom->password['obfuscate'] = true;
+$config->custom->appearance['hide_template_warning'] = true;
+
+// Configuraciones de la interfaz
+$config->custom->appearance['friendly_attrs'] = array(
+    'facsimileTelephoneNumber' => 'Fax',
+    'gid'                      => 'Group',
+    'mail'                     => 'Email',
+    'telephoneNumber'          => 'Teléfono',
+    'uid'                      => 'ID Usuario',
+    'userPassword'             => 'Contraseña'
+);
+?>
+EOF
+
+# ==============================================
+# 5. SCRIPT PARA GENERAR CERTIFICADOS SSL
+# ==============================================
+cat > generate_certs.sh << 'EOF'
+#!/bin/bash
+# Script para generar certificados autofirmados para LDAP
+mkdir -p certs
+
+# Generar clave privada
+openssl genrsa -out certs/ldap.key 2048
+
+# Generar certificado autofirmado
+openssl req -new -x509 -key certs/ldap.key -out certs/ldap.crt -days 365 \
+  -subj "/C=ES/ST=Madrid/L=Madrid/O=Mi Organizacion/OU=IT/CN=ldap.example.org"
+
+# Generar parámetros DH
+openssl dhparam -out certs/dhparam.pem 2048
+
+# Copiar certificado como CA
+cp certs/ldap.crt certs/ca.crt
+
+# Establecer permisos correctos
+chmod 600 certs/*.key
+chmod 644 certs/*.crt certs/*.pem
+
+echo "Certificados generados en ./certs/"
+EOF
+
+chmod +x generate_certs.sh
+
+# ==============================================
+# 6. SCRIPTS DE GESTIÓN
+# ==============================================
+
+# Script para iniciar el stack
+cat > start_ldap.sh << 'EOF'
+#!/bin/bash
+echo "Iniciando stack LDAP completo..."
+docker-compose up -d
+
+echo "Esperando que los servicios estén listos..."
+sleep 10
+
+echo "Estado de los servicios:"
+docker-compose ps
+
+echo ""
+echo "URLs de acceso:"
+echo "- phpLDAPadmin: http://localhost:8080"
+echo "- LDAP Server: ldap://localhost:389"
+echo "- LDAPS Server: ldaps://localhost:636"
+echo ""
+echo "Credenciales por defecto:"
+echo "- Usuario admin: cn=admin,dc=example,dc=org"
+echo "- Contraseña: admin_password_123"
+EOF
+
+chmod +x start_ldap.sh
+
+# Script para parar el stack
+cat > stop_ldap.sh << 'EOF'
+#!/bin/bash
+echo "Deteniendo stack LDAP..."
+docker-compose down
+EOF
+
+chmod +x stop_ldap.sh
+
+# Script para backup manual
+cat > backup_ldap.sh << 'EOF'
+#!/bin/bash
+BACKUP_DIR="./backups"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+mkdir -p $BACKUP_DIR
+
+echo "Creando backup de LDAP..."
+
+# Backup de configuración
+docker-compose exec openldap slapcat -n 0 > "$BACKUP_DIR/config-$TIMESTAMP.ldif"
+
+# Backup de datos
+docker-compose exec openldap slapcat -n 1 > "$BACKUP_DIR/data-$TIMESTAMP.ldif"
+
+echo "Backup completado en $BACKUP_DIR/"
+echo "Archivos creados:"
+echo "- config-$TIMESTAMP.ldif"
+echo "- data-$TIMESTAMP.ldif"
+EOF
+
+chmod +x backup_ldap.sh
+
+# Script para restaurar backup
+cat > restore_ldap.sh << 'EOF'
+#!/bin/bash
+if [ "$#" -ne 1 ]; then
+    echo "Uso: $0 <timestamp>"
+    echo "Ejemplo: $0 20241225_120000"
+    exit 1
+fi
+
+TIMESTAMP=$1
+BACKUP_DIR="./backups"
+
+if [ ! -f "$BACKUP_DIR/data-$TIMESTAMP.ldif" ]; then
+    echo "Error: No se encuentra el archivo de backup data-$TIMESTAMP.ldif"
+    exit 1
+fi
+
+echo "¡ADVERTENCIA! Esto sobrescribirá todos los datos actuales."
+read -p "¿Continuar? (y/N): " confirm
+
+if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+    echo "Operación cancelada."
+    exit 1
+fi
+
+echo "Deteniendo servicios..."
+docker-compose stop
+
+echo "Limpiando volúmenes..."
+docker-compose down -v
+
+echo "Restaurando desde backup $TIMESTAMP..."
+docker-compose up -d openldap
+
+sleep 15
+
+# Restaurar configuración
+docker-compose exec openldap slapadd -n 0 -F /etc/ldap/slapd.d -l "/backups/config-$TIMESTAMP.ldif"
+
+# Restaurar datos
+docker-compose exec openldap slapadd -n 1 -F /etc/ldap/slapd.d -l "/backups/data-$TIMESTAMP.ldif"
+
+docker-compose restart openldap
+docker-compose up -d
+
+echo "Restauración completada."
+EOF
+
+chmod +x restore_ldap.sh
+
+# ==============================================
+# 7. SCRIPT PARA AÑADIR USUARIOS VIA CLI
+# ==============================================
+cat > add_user.sh << 'EOF'
+#!/bin/bash
+# Script para añadir usuarios de forma interactiva
+
+if [ "$#" -ne 4 ]; then
+    echo "Uso: $0 <username> <nombre> <apellido> <email>"
+    echo "Ejemplo: $0 jperez Juan Perez juan.perez@example.org"
+    exit 1
+fi
+
+USERNAME=$1
+FIRSTNAME=$2
+LASTNAME=$3
+EMAIL=$4
+
+# Obtener siguiente UID disponible
+NEXT_UID=$(docker-compose exec openldap ldapsearch -x -H ldap://localhost -b "ou=People,dc=example,dc=org" -D "cn=admin,dc=example,dc=org" -w "admin_password_123" "(objectClass=posixAccount)" uidNumber | grep uidNumber | awk '{print $2}' | sort -n | tail -1)
+NEXT_UID=$((NEXT_UID + 1))
+
+# Generar contraseña temporal
+TEMP_PASSWORD=$(openssl rand -base64 12)
+
+# Crear archivo LDIF temporal
+cat > /tmp/newuser.ldif << EOF
+dn: uid=$USERNAME,ou=People,dc=example,dc=org
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: $USERNAME
+sn: $LASTNAME
+givenName: $FIRSTNAME
+cn: $FIRSTNAME $LASTNAME
+displayName: $FIRSTNAME $LASTNAME
+uidNumber: $NEXT_UID
+gidNumber: 10001
+userPassword: $TEMP_PASSWORD
+gecos: $FIRSTNAME $LASTNAME
+loginShell: /bin/bash
+homeDirectory: /home/$USERNAME
+mail: $EMAIL
+EOF
+
+# Añadir usuario al LDAP
+docker-compose exec openldap ldapadd -x -H ldap://localhost -D "cn=admin,dc=example,dc=org" -w "admin_password_123" -f /tmp/newuser.ldif
+
+if [ $? -eq 0 ]; then
+    echo "Usuario $USERNAME creado exitosamente!"
+    echo "Contraseña temporal: $TEMP_PASSWORD"
+    echo "UID asignado: $NEXT_UID"
+else
+    echo "Error al crear el usuario $USERNAME"
+fi
+
+# Limpiar archivo temporal
+rm /tmp/newuser.ldif
+EOF
+
+chmod +x add_user.sh
+
+# ==============================================
+# INSTRUCCIONES DE USO
+# ==============================================
+
+cat > README.md << 'EOF'
+# Stack LDAP con Docker Compose
+
+## Inicio Rápido
+
+1. **Configurar certificados SSL (opcional):**
+   ```bash
+   ./generate_certs.sh
+   ```
+
+2. **Iniciar el stack:**
+   ```bash
+   ./start_ldap.sh
+   ```
+
+3. **Acceder a phpLDAPadmin:**
+   - URL: http://localhost:8080
+   - Usuario: cn=admin,dc=example,dc=org
+   - Contraseña: admin_password_123
+
+## Configuración Personalizada
+
+### Cambiar dominio y organización:
+Edita las variables en `docker-compose.yml`:
+- `LDAP_ORGANISATION`
+- `LDAP_DOMAIN`
+- `LDAP_BASE_DN`
+
+### Cambiar contraseñas:
+**¡IMPORTANTE! Cambia las contraseñas por defecto antes de usar en producción:**
+- `LDAP_ADMIN_PASSWORD`
+- `LDAP_CONFIG_PASSWORD`
+
+## Gestión de Usuarios
+
+### Añadir usuario via script:
+```bash
+./add_user.sh jperez Juan Perez juan.perez@example.org
+```
+
+### Añadir usuario manualmente:
+```bash
+docker-compose exec openldap ldapadd -x -H ldap://localhost -D "cn=admin,dc=example,dc=org" -w "admin_password_123" -f usuario.ldif
+```
+
+## Backup y Restauración
+
+### Backup manual:
+```bash
+./backup_ldap.sh
+```
+
+### Backup automático:
+```bash
+docker-compose --profile backup up -d
+```
+
+### Restaurar backup:
+```bash
+./restore_ldap.sh 20241225_120000
+```
+
+## Comandos Útiles
+
+### Ver logs:
+```bash
+docker-compose logs -f openldap
+docker-compose logs -f phpldapadmin
+```
+
+### Buscar usuarios:
+```bash
+docker-compose exec openldap ldapsearch -x -H ldap://localhost -b "ou=People,dc=example,dc=org" -D "cn=admin,dc=example,dc=org" -w "admin_password_123"
+```
+
+### Verificar conectividad:
+```bash
+docker-compose exec openldap ldapwhoami -x -H ldap://localhost -D "cn=admin,dc=example,dc=org" -w "admin_password_123"
+```
+
+## Seguridad en Producción
+
+1. **Cambiar todas las contraseñas por defecto**
+2. **Configurar SSL/TLS apropiadamente**
+3. **Usar variables de entorno desde archivo .env**
+4. **Configurar firewall para limitar acceso**
+5. **Implementar monitoreo y alertas**
+6. **Configurar backup automático**
+
+## Puertos Utilizados
+
+- 389: LDAP (no cifrado)
+- 636: LDAPS (cifrado SSL)
+- 8080: phpLDAPadmin HTTP
+- 8443: phpLDAPadmin HTTPS
+
+## Estructura de Directorios
+
+```
+ldap-stack/
+├── docker-compose.yml
+├── .env
+├── certs/              # Certificados SSL
+├── ldif/              # Archivos de inicialización
+├── phpldapadmin-config/ # Configuración personalizada
+├── backups/           # Respaldos automáticos
+└── scripts/           # Scripts de utilidad
+```
+EOF
+
+echo "Stack LDAP configurado exitosamente!"
+echo ""
+echo "Próximos pasos:"
+echo "1. Revisar y personalizar docker-compose.yml"
+echo "2. Ejecutar: ./generate_certs.sh (opcional)"
+echo "3. Ejecutar: ./start_ldap.sh"
+echo "4. Acceder a http://localhost:8080"
