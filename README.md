@@ -49,4 +49,21 @@ Antes de desplegar el stack en producción:
 ---
 
 ## 📂 Estructura
+ldap_ldapphpadmin/
+├── docker-compose.yml
+├── .env
+├── backup/
+│ ├── scripts/
+│ └── data/
+└── certs/
+
+
+---
+
+## 🛠️ Requisitos
+- Docker >= 20.x  
+- Docker Compose >= 2.x  
+
+---
+
 
